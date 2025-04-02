@@ -1,2 +1,5 @@
 *.hdf5
 *.npz
+**/__pycache__/
+models/
+*.pth

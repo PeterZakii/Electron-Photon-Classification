@@ -5,125 +5,71 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, RandomSampler, DataLoader
+from torch.utils.data import DataLoader, RandomSampler
 from sklearn.metrics import accuracy_score
 from model import ResNet15
+from utils import HDF5Dataset
 
-class HDF5Dataset(Dataset):
-    def __init__(self, h5_path):
-        with h5py.File(h5_path, "r") as f:
-            self.images = f["images"][:]
-            self.labels = f["labels"][:]
-        self.images = torch.tensor(self.images, dtype=torch.float32)
-        self.labels = torch.tensor(self.labels, dtype=torch.long)
+class Trainer:
+    def __init__(self, model, train_loader, val_loader, test_loader, device, experiment_id, base_dir):
+        self.model = model.to(device)
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.test_loader = test_loader
+        self.device = device
+        self.save_model_dir = base_dir / "models" / experiment_id
+        self.save_model_dir.mkdir(parents=True, exist_ok=True)
+        self.model_path = self.save_model_dir / "best_model.pth"
 
-    def __len__(self):
-        return len(self.labels)
+        self.criterion = nn.BCEWithLogitsLoss()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
+        self.best_val_acc = 0
 
-    def __getitem__(self, idx):
-        return self.images[idx], self.labels[idx]
-    
-base_dir = Path(__file__).resolve().parent
-data_dir = base_dir.parent / 'data/preprocessed'
+    def train_one_epoch(self):
+        self.model.train()
+        total_loss = 0
+        for X, y in self.train_loader:
+            X, y = X.to(self.device), y.to(self.device).unsqueeze(1).float()
+            y_pred = self.model(X)
+            loss = self.criterion(y_pred, y)
 
-train_data_file = 'train_dataset.hdf5'
-val_data_file = 'val_dataset.hdf5'
-test_data_file = 'test_dataset.hdf5'
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
 
-train_dataset = HDF5Dataset(data_dir / train_data_file)
-val_dataset = HDF5Dataset(data_dir / val_data_file)
-test_dataset = HDF5Dataset(data_dir / test_data_file)
+            total_loss += loss.item()
+        return total_loss
 
-train_sampler = RandomSampler(train_dataset)
-train_loader = DataLoader(train_dataset, batch_size=64, sampler=train_sampler)
-val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)    
+    def evaluate(self, loader):
+        self.model.eval()
+        all_preds = []
+        all_labels = []
+        with torch.no_grad():
+            for X, y in loader:
+                X, y = X.to(self.device), y.to(self.device).unsqueeze(1).float()
+                y_pred = self.model(X)
+                probs = torch.sigmoid(y_pred)
+                preds = (probs > 0.5).int()
+                all_preds.extend(preds.cpu().numpy().flatten())
+                all_labels.extend(y.cpu().numpy().flatten())
+        return accuracy_score(all_labels, all_preds)
 
+    def train(self, num_epochs):
+        print("Training the model...")
+        for epoch in tqdm(range(num_epochs)):
+            loss = self.train_one_epoch()
+            val_acc = self.evaluate(self.val_loader)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = ResNet15(img_channels=2, num_classes=1)
-model.to(device)
+            print(f"Epoch {epoch+1}/{num_epochs}, Loss: {loss:.4f}, Validation Accuracy: {val_acc:.4f}")
 
-criterion = nn.BCEWithLogitsLoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-4)
+            if val_acc > self.best_val_acc:
+                self.best_val_acc = val_acc
 
+                torch.save(self.model.state_dict(), self.model_path)
+                print("Model saved.")
 
-
-def train(data_loader, model, criterion, optimizer):
-    model.train()
-    total_loss = 0
-
-    for X, y in data_loader:
-        X, y = X.to(device), y.to(device).unsqueeze(1).float()
-
-        y_pred = model(X)
-        loss = criterion(y_pred, y)
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item()
-
-    return total_loss
-
-def evaluate(data_loader, model):
-    model.eval()
-    all_preds = []
-    all_labels = []
-    with torch.no_grad():
-        for X, y in data_loader:
-            X, y = X.to(device), y.to(device).unsqueeze(1).float()
-
-            y_pred = model(X)
-            probs = torch.sigmoid(y_pred)
-            preds = (probs > 0.5).int()
-
-            all_preds.extend(preds.cpu().numpy().flatten())
-            all_labels.extend(y.cpu().numpy().flatten())
-
-            val_acc = accuracy_score(all_labels, all_preds)
-
-    return val_acc
-
-
-num_epochs = 10
-best_val_acc = 0
-
-for epoch in tqdm(range(num_epochs)):
-    # Training
-    train_loss = train(train_loader, model, criterion, optimizer)
-    
-    # Validation
-    val_acc = evaluate(val_loader, model)
-
-    
-    if val_acc > best_val_acc:
-        best_val_acc = val_acc
-        torch.save(model.state_dict(), "best_resnet15.pth")
-        print("Model saved.")
-
-    # Print training and validation metrics
-    print(f"Epoch {epoch+1}/{num_epochs}, Loss: {train_loss:.4f}, Validation Accuracy: {val_acc:.4f}")
-
-
-# Testing
-print("Testing the model...")
-model.load_state_dict(torch.load("best_resnet15.pth"))
-model.eval()
-all_preds = []
-all_labels = []
-
-with torch.no_grad():
-    for X, y in test_loader:
-        X, y = X.to(device), y.to(device).unsqueeze(1).float()
-
-        y_pred = model(X)
-        probs = torch.sigmoid(y_pred)
-        preds = (probs > 0.5).int()
-
-        all_preds.extend(preds.cpu().numpy().flatten())
-        all_labels.extend(y.cpu().numpy().flatten())
-
-test_acc = accuracy_score(all_labels, all_preds)
-print(f"Test Accuracy: {test_acc:.4f}")
+    def test(self):
+        print("Testing the model...")
+        self.model.load_state_dict(torch.load(self.model_path))
+        acc = self.evaluate(self.test_loader)
+        print(f"Test Accuracy: {acc:.4f}")
