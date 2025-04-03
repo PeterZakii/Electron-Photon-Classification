@@ -1,6 +1,9 @@
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, RandomSampler
+import torch.nn as nn
+import torch.optim as optim
+import torch.optim.lr_scheduler as lr_scheduler
 from model import ResNet15
 from train import Trainer
 from utils import HDF5Dataset, generate_experiment_id
@@ -34,10 +37,14 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ResNet15(img_channels=2, num_classes=1)
 
-    trainer = Trainer(model, train_loader, val_loader, test_loader, device, experiment_id, base_dir)
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode= 'max', patience=2, factor=0.5, verbose=True)
+
+    trainer = Trainer(model, criterion, optimizer, scheduler, train_loader, val_loader, test_loader, device, experiment_id, base_dir)
 
     # Train and test
-    trainer.train(num_epochs=1)
+    trainer.train(num_epochs=35)
     trainer.test()
 
 

@@ -1,17 +1,21 @@
-import h5py
-import numpy as np
-from pathlib import Path
 from tqdm import tqdm
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, RandomSampler
 from sklearn.metrics import accuracy_score
-from model import ResNet15
-from utils import HDF5Dataset
+
 
 class Trainer:
-    def __init__(self, model, train_loader, val_loader, test_loader, device, experiment_id, base_dir):
+    def __init__(self,
+                 model, 
+                 criterion, 
+                 optimizer, 
+                 scheduler,
+                 train_loader, 
+                 val_loader, 
+                 test_loader, 
+                 device, 
+                 experiment_id, 
+                 base_dir
+    ):
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -21,8 +25,9 @@ class Trainer:
         self.save_model_dir.mkdir(parents=True, exist_ok=True)
         self.model_path = self.save_model_dir / "best_model.pth"
 
-        self.criterion = nn.BCEWithLogitsLoss()
-        self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
+        self.criterion = criterion
+        self.optimizer = optimizer
+        self.scheduler = scheduler
         self.best_val_acc = 0
 
     def train_one_epoch(self):
@@ -40,16 +45,18 @@ class Trainer:
             total_loss += loss.item()
         return total_loss
 
-    def evaluate(self, loader):
+    def evaluate(self):
         self.model.eval()
         all_preds = []
         all_labels = []
         with torch.no_grad():
-            for X, y in loader:
+            for X, y in self.val_loader:
                 X, y = X.to(self.device), y.to(self.device).unsqueeze(1).float()
                 y_pred = self.model(X)
+
                 probs = torch.sigmoid(y_pred)
                 preds = (probs > 0.5).int()
+
                 all_preds.extend(preds.cpu().numpy().flatten())
                 all_labels.extend(y.cpu().numpy().flatten())
         return accuracy_score(all_labels, all_preds)
@@ -58,7 +65,8 @@ class Trainer:
         print("Training the model...")
         for epoch in tqdm(range(num_epochs)):
             loss = self.train_one_epoch()
-            val_acc = self.evaluate(self.val_loader)
+            val_acc = self.evaluate()
+            self.scheduler.step(val_acc)
 
             print(f"Epoch {epoch+1}/{num_epochs}, Loss: {loss:.4f}, Validation Accuracy: {val_acc:.4f}")
 
